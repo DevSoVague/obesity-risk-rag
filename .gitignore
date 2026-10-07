@@ -1,0 +1,58 @@
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Secrets (never commit)
+.env
+.env.*
+!.env.example
+.Renviron
+Renviron
+*credentials*.json
+token.json
+service-account*.json
+*.pem
+somecommands*.txt
+
+# Data, models, build artifacts (fetch via scripts / Releases)
+data/
+*.joblib
+*.pt
+*.pth
+*.npz
+*.npy
+*.parquet
+*.zip
+*.gz
+.terraform/
+*.tfstate*
+*.log
+
+# Project-specific (download via scripts/download_data.sh or the GitHub Release)
+*.csv
+*.xpt
+*.XPT
+pdfs/
+app/pdfs/
+app/merged_data/
+app/rag_index/
+notebooks/demographics_data/
+notebooks/exam_data/
+notebooks/lab_data/
+notebooks/quest_data/
+notebooks/merged_data/
+notebooks/model2_bundles/
+rag_index_*.npz
+final_overall.zip
+pr1/
+pr2/
