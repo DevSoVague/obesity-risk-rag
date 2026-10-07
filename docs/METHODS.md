@@ -35,7 +35,7 @@ This document explains not just *how* to run the system, but *why* each componen
 
 WHO estimates over 650 million adults globally live with obesity, but most are not formally classified until complications appear (type 2 diabetes, cardiovascular disease, musculoskeletal disorders). The barrier is methodological. Accurate BMI requires a scale and a stadiometer, lipid panels and HbA1c require phlebotomy, and the translation of a numeric BMI into a WHO severity category is rarely communicated to patients in actionable terms.
 
-The ML literature on obesity classification has largely sidestepped this barrier by training on `Weight`, `Height`, and exact BMI as features. Since `BMI = Weight / Height²` is an algebraic identity, the model is being asked to solve a deterministic equation rather than learn lifestyle-mediated risk. Reported F1 > 0.99 in such papers is the cost of that shortcut: those models cannot generalize to a self-assessment context where the user does not know their exact body mass.
+The ML literature on obesity classification has largely sidestepped this barrier by training on `Weight`, `Height`, and exact BMI as features. Since `BMI = Weight / Height²` is an algebraic identity, the model is being asked to solve a deterministic equation rather than learn lifestyle-mediated risk. Near-perfect scores in such papers are the product of that shortcut: those models cannot generalize to a self-assessment context where the user does not know their exact body mass.
 
 This project is built around the deployment scenario where a user answers eleven plain-language lifestyle questions, optionally provides clinical measurements if available, and receives an obesity classification plus a tailored nutrition plan. No laboratory work is required at baseline.
 
@@ -43,7 +43,7 @@ This project is built around the deployment scenario where a user answers eleven
 
 A single classifier cannot honestly span this problem because:
 
-- The Overweight I and Overweight II boundary (BMI 25–29.9 vs. 30+) is the hardest discrimination in the WHO target space and the one where lifestyle features alone underperform. In the trained Stage 1 model, Overweight I has F1 0.83 versus 0.91+ for every other class.
+- The Overweight I and Overweight II boundary (BMI 25–29.9 vs. 30+) is the hardest discrimination in the WHO target space and the one where lifestyle features alone are least able to separate adjacent classes.
 - Clinical measurements (waist circumference, fasting glucose, HbA1c) add real discriminative signal in this boundary region, but requiring them upfront defeats the screening goal.
 
 The solution is to make Stage 1 the default path, route only borderline overweight cases to Stage 2 with optional clinical inputs, and degrade gracefully when those inputs are missing (the Model 2 pipeline imputes via medians).
@@ -83,7 +83,7 @@ Model 1                  Model 2              │
                                                   → Revise (≤2x) → Translate
                                                        │
                                                        ▼
-                                           Gemini API  /  CMU AI Gateway
+                                           Gemini API  /  Anthropic API 
                                            (chat backend, swappable)
 ```
 
@@ -97,7 +97,7 @@ The five layers (Streamlit, FastAPI, two-stage model pipeline, Milvus, LangGraph
 |---|---|
 | `model_pipeline.py` | Trains Model 1, defines `run_inference`, the composite `compute_confidence_for_class`, the `should_trigger_model2` router, `run_model2_inference`, and `assess_diabetes_risk`. |
 | `main.py` | FastAPI server. Loads the Model 1 bundle once at startup, lazy-loads Model 2 bundles by gender on escalation. |
-| `obesity_app_v2.py` | Streamlit frontend. Three tabs: Assessment, Nutrition Plan (RAG chat), Index PDFs. Handles backend toggling between Gemini and CMU Gateway. |
+| `obesity_app_v2.py` | Streamlit frontend. Three tabs: Assessment, Nutrition Plan (RAG chat), Index PDFs. Handles backend toggling between Gemini and the Anthropic API. |
 | `indexer.py` | PDF ingestion (`pdfminer.six`), chunking (400 tokens, 50 overlap), embedding (BGE local or Gemini API), Milvus collection management with three index types, and the LangGraph pipeline. |
 | `resave_bundles.py` | Retrains the three Model 2 bundles (pooled / male / female) from the merged NHANES CSVs. |
 | `ObesityDataSet_raw_and_data_sinthetic.csv` | UCI obesity dataset, n=2,111. Real survey responses plus SMOTE augmentation. Used to train Model 1. |
@@ -105,7 +105,7 @@ The five layers (Streamlit, FastAPI, two-stage model pipeline, Milvus, LangGraph
 | `pdfs/` | 14 clinical guideline and research PDFs to index (not redistributed; see [sources.md](sources.md)). |
 | `obesity_model_bundle.joblib` | Pre-trained Model 1 bundle: 12-feature RF, scaler, class centroids, demographic profiles, tuned confidence weights, label mapping. ~25 MB. |
 | `model2_bundles/` | Three pre-trained Model 2 bundles + `model2_metadata.json` listing the 40 NHANES features. |
-| `obesity_rf_metadata.json` | Human-readable Model 1 metadata: hyperparameters, features, CV F1, confidence weights. |
+| `obesity_rf_metadata.json` | Human-readable Model 1 metadata: hyperparameters, features, confidence weights. |
 
 Pre-trained bundles are published as GitHub Release assets (see the root README), so retraining is only needed if you change the data.
 
@@ -127,15 +127,7 @@ The data is partially synthetic: real survey responses augmented with SMOTE to b
 
 ### The leakage problem and its cost
 
-The raw dataset contains `Weight` (kg) and `Height` (m). Exact BMI is `Weight / Height²`, an algebraic identity. Including either weight, height, or exact BMI gives the model a deterministic route to the WHO target class:
-
-| Configuration | CV F1-macro |
-|---|---|
-| With exact BMI (leaked) | 0.992 |
-| With four-level WHO BMI bucket (leakage-free, 17 features) | 0.9535 |
-| Lean 12-feature set (shipped bundle) | 0.9471 |
-
-Source: `notebooks/00_model1_development.ipynb` (exact-BMI run: 0.9928 +/- 0.0055; tuned BMI-bucket run: 0.9535 +/- 0.0093) and `obesity_rf_metadata.json` (shipped 12-feature bundle retrained by `model_pipeline.py`: 0.9471). The gap between the leaked and leakage-free runs is the cost of removing the algebraic shortcut. The 0.992 number is the cost of solving an identity. Any future feature engineering that recomputes BMI from `Weight` and `Height` reintroduces the leak; the training pipeline drops `Height`, `Weight`, `BMI`, and any BMI-derived interactions explicitly to prevent this.
+The raw dataset contains `Weight` (kg) and `Height` (m). Exact BMI is `Weight / Height²`, an algebraic identity. Including either weight, height, or exact BMI gives the model a deterministic route to the WHO target class, so a model trained on them is solving an identity rather than learning lifestyle-mediated risk. `notebooks/00_model1_development.ipynb` compares an exact-BMI configuration against the leakage-free BMI-bucket configuration to make that shortcut explicit. Any future feature engineering that recomputes BMI from `Weight` and `Height` reintroduces the leak; the training pipeline drops `Height`, `Weight`, `BMI`, and any BMI-derived interactions explicitly to prevent this.
 
 ### Why a four-level BMI bucket
 
@@ -148,7 +140,7 @@ The user does not need to enter exact body mass in a self-assessment. They self-
 3 = Obese       (>30)
 ```
 
-This preserves the spirit of self-report (no scale required) while recovering most of the discriminative signal. `BMI_bucket` is the top feature in the Stage 1 importance ranking.
+This preserves the spirit of self-report (no scale required) while keeping coarse body-size information. `BMI_bucket` is the top feature in the Stage 1 importance ranking.
 
 ### The 12-feature set
 
@@ -162,7 +154,7 @@ What was dropped and why:
 - `FAVC` (frequent high-calorie food) - SHAP importance below the same 0.015 threshold.
 - `Weight_x_FAF`, `BMI_x_FAF` interactions - derived from the leaked features, dropped with them.
 
-What was added: `Age_x_FCVC`, the product of standardized age and vegetable consumption. The intuition is that older individuals who eat more vegetables break the expected obesity pattern. This interaction ranks fifth in mean SHAP importance, validating its inclusion.
+What was added: `Age_x_FCVC`, the product of standardized age and vegetable consumption. The intuition is that older individuals who eat more vegetables break the expected obesity pattern. This interaction is kept on the basis of its mean SHAP importance.
 
 ### Encoding strategy
 
@@ -171,22 +163,16 @@ What was added: `Age_x_FCVC`, the product of standardized age and vegetable cons
 | Binary yes/no | Gender, family_history | 0/1 map | Single bit is sufficient |
 | Frequency-ordered | CAEC, CALC | Ordinal 0–3 | Preserves intensity ordering (no, sometimes, frequently, always) |
 | Continuous | Age, FCVC, NCP, CH2O, FAF, TUE | Standardized (μ=0, σ=1) | Required for cosine similarity in the confidence scorer |
-| Engineered | Age × FCVC | Product interaction | 5th in SHAP importance |
+| Engineered | Age × FCVC | Product interaction | Captures diet effect varying with age |
 | Target | NObeyesdad (7 classes) | Label encoded 0–6 | Ordered severity integer |
 
 The Random Forest itself does not need scaled features for tree construction, but the cosine similarity component of the confidence scorer does, so the same scaler is fit once and used in both places.
 
 ### Model selection
 
-Three architectures were evaluated under five-fold stratified CV during development (notebook 00):
+Three architectures were compared under five-fold stratified CV during development (notebook 00): Logistic Regression, Gradient Boosting, and Random Forest. Random Forest was selected.
 
-| Model | F1-macro | Notes |
-|---|---|---|
-| Logistic Regression | 0.55 | Insufficient for a seven-class non-linear problem |
-| Gradient Boosting | 0.81 | Higher fold-to-fold variance |
-| **Random Forest** | **0.9535** (17 features) | Selected |
-
-Random Forest was chosen for three reasons beyond raw F1: calibrated per-class probabilities (needed for the confidence scorer), Gini importances that closely matched SHAP rankings (post-hoc interpretability without a secondary explanation model), and native handling of non-linearity without feature scaling at the tree level.
+Random Forest was chosen for three reasons: calibrated per-class probabilities (needed for the confidence scorer), Gini importances that closely matched SHAP rankings (post-hoc interpretability without a secondary explanation model), and native handling of non-linearity without feature scaling at the tree level.
 
 Hyperparameters are tuned with `RandomizedSearchCV` over 40 iterations under five-fold stratified CV, optimizing F1-macro. The selected configuration is stored in `obesity_rf_metadata.json`:
 
@@ -197,29 +183,9 @@ Hyperparameters are tuned with `RandomizedSearchCV` over 40 iterations under fiv
 }
 ```
 
-### Performance summary
-
-Development model (17 features incl. BMI bucket, notebook 00): CV F1-macro 0.9535 +/- 0.0093; held-out test (n=423) accuracy and F1-macro 0.93.
-
-Lean 12-feature model: CV F1-macro 0.9439 +/- 0.0109 in notebook 00, 0.9471 for the shipped bundle produced by `model_pipeline.py`.
-
-Per-class test F1 for the development model (from notebook 00, see `assets/per_class_f1.png`):
-
-```
-Insufficient Weight   0.99
-Normal Weight         0.98
-Overweight Level I    0.83   <- worst, motivates Stage 2
-Overweight Level II   0.84
-Obesity Type I        0.93
-Obesity Type II       0.93
-Obesity Type III      0.97
-```
-
 ### Error adjacency
 
-Most Stage 1 errors are clinically adjacent (one severity step away). This matters because a patient predicted as Overweight II rather than Obesity I receives nutritionally similar guidance, whereas a distant error (Normal Weight predicted as Obesity II, for example) would be a dangerous failure mode.
-
-On the development model's held-out test split (`assets/confusion_matrix.png`), 27 of 31 errors are adjacent, and the largest off-diagonal cell is Overweight I predicted as Overweight II (12). Four errors are not adjacent: Overweight II predicted as Obesity III (2 cases, three steps) and Obesity III predicted as Obesity I (2 cases, two steps). So a strict "every error within one category" guarantee does not hold on this split. No Normal/Insufficient case is predicted into an obesity class.
+Stage 1 errors are inspected for clinical adjacency (one severity step away) in notebook 00. This matters because a patient predicted as Overweight II rather than Obesity I receives nutritionally similar guidance, whereas a distant error (Normal Weight predicted as Obesity II, for example) would be a dangerous failure mode.
 
 ---
 
@@ -257,10 +223,6 @@ d (demographic align) = 0.0603
 
 Note that `b` and `c` carry almost all the signal, and `a` and `d` act as small corrections. This is consistent with the model probability being the strongest single predictor, with confusion-risk subtraction doing the heavy lifting on borderline cases.
 
-### Empirical validation
-
-In notebook 00 the selected weight set had a separation gap of 0.2863 between the score distributions of correct and incorrect out-of-fold predictions (versus 0.1719 and 0.2237 for the other candidate weightings). The shipped bundle's weights were re-tuned by `model_pipeline.py` and are listed above.
-
 ### Tier mapping (for UI display)
 
 ```
@@ -283,9 +245,9 @@ The router (`should_trigger_model2` in `model_pipeline.py`) fires when **all** o
 1. Stage 1's top class is `Overweight_Level_I` or `Overweight_Level_II`.
 2. **Either** confidence < 75%, **or** the runner-up is the other OW class.
 
-The first condition restricts escalation to the boundary region where Stage 1 is known to underperform (Overweight I has F1 0.83). The second condition catches both the obvious case (low confidence anywhere) and the subtle case (high confidence in OW_I but with OW_II as a close second, or vice versa, which is the exact ambiguity Stage 2 is designed to resolve).
+The first condition restricts escalation to the Overweight boundary region, the hardest discrimination for lifestyle features. The second condition catches both the obvious case (low confidence anywhere) and the subtle case (high confidence in OW_I but with OW_II as a close second, or vice versa, which is the exact ambiguity Stage 2 is designed to resolve).
 
-Outside this boundary region, Stage 1 per-class test F1 is 0.93 or higher and escalation would add latency and a clinical-input friction with no expected benefit.
+Outside this boundary region, escalation would add latency and clinical-input friction with no expected benefit.
 
 ### Training data
 
@@ -320,15 +282,9 @@ Median imputation is what enables graceful degradation when the user provides on
 
 ### Gender-specific routing
 
-Three bundles are trained: `model2_pooled_bundle.joblib`, `model2_male_bundle.joblib`, `model2_female_bundle.joblib`. At inference time, `_load_model2_bundle(gender)` selects the gender-matched bundle (`gender=0` is male, `gender=1` is female in the NHANES convention) and falls back to the pooled bundle if the gender-specific file is missing. This is biologically motivated: waist-hip ratio cutoffs, fat distribution patterns, and HOMA-IR distributions differ enough between sexes that pooled training underperforms on both subgroups.
+Three bundles are trained: `model2_pooled_bundle.joblib`, `model2_male_bundle.joblib`, `model2_female_bundle.joblib`. At inference time, `_load_model2_bundle(gender)` selects the gender-matched bundle (`gender=0` is male, `gender=1` is female in the NHANES convention) and falls back to the pooled bundle if the gender-specific file is missing. This is biologically motivated: waist-hip ratio cutoffs, fat distribution patterns, and HOMA-IR distributions differ between sexes, so sex-specific models are trained alongside the pooled one.
 
-### Stage 2 results (notebook 03)
-
-| Model | n | CV F1-macro | Test accuracy | Test ROC-AUC |
-|---|---|---|---|---|
-| Pooled | 2,289 | 0.9139 | 0.89 | 0.9675 |
-| Male | 1,053 | 0.9069 | 0.90 | 0.9719 |
-| Female | 1,236 | 0.9131 | 0.90 | 0.9610 |
+### Shipped bundles vs notebook models
 
 The shipped bundles were refit on the full data by `resave_bundles.py` with fixed hyperparameters, so they are not identical to the tuned notebook models.
 
@@ -426,7 +382,7 @@ When the user moves from Assessment to Nutrition Plan, the Stage 1 and Stage 2 r
 The generation backend is swappable between two providers without code changes:
 
 - **Gemini API.** `gemini-2.5-flash`, `gemini-2.5-pro`, or `gemini-2.0-flash-lite`. Requires `GEMINI_API_KEY`.
-- **CMU AI Gateway.** OpenAI-compatible endpoint at `https://ai-gateway.andrew.cmu.edu`. Routes to Claude Sonnet or other models. Requires a CMU gateway key.
+- **Anthropic API.** Public Anthropic Messages API via the `anthropic` SDK (Claude Sonnet, Haiku, or Opus). Requires `ANTHROPIC_API_KEY`.
 
 The active indexer's `_call_claude` method is monkey-patched at query time with the appropriate API client and model identifier. Web search grounding (via Gemini's google_search tool) is available when enabled and adds a 3–5 sentence current-information snippet to the retrieval context.
 
@@ -449,7 +405,7 @@ The indexed vector store can be exported as a compressed `.npz` archive (embeddi
 The Assessment tab requires no keys. The Nutrition Plan tab requires one of:
 
 - `GEMINI_API_KEY` (Google AI Studio). Used for both LLM generation and optionally as the embedding backend.
-- A CMU AI Gateway key, for routing through CMU's gateway to Claude or other models.
+- `ANTHROPIC_API_KEY`, for routing generation through the Anthropic API to Claude.
 
 Both can be entered in the Streamlit sidebar at runtime; environment variables are optional.
 
@@ -548,7 +504,7 @@ When Stage 2 triggers, the form exposes a clinical measurements section with a s
 RAG chat over the indexed PDFs. Sidebar toggle picks the backend:
 
 - **Gemini direct** (default). Set `GEMINI_API_KEY` in the environment before launching, or paste it into the Index PDFs tab. Pick a model from `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash-lite`.
-- **CMU AI Gateway.** Toggle on, paste your gateway key. The app monkey-patches `_call_claude` to route through the gateway, so no Anthropic key is needed.
+- **Anthropic API.** Toggle on; the key field is prefilled from `ANTHROPIC_API_KEY` (or paste it). The app monkey-patches `_call_claude` to call the Anthropic Messages API, so no Gemini key is needed for generation.
 
 The Assessment results are automatically prepended to the first chat query as patient context. If you have not indexed the PDFs yet, the chat returns nothing useful; index first.
 
@@ -723,9 +679,7 @@ Restart `uvicorn` afterward.
 | `MILVUS_COLLECTION` | `papers_rag` | `indexer.py` |
 | `GEMINI_API_KEY` | empty | `indexer.py`, Streamlit |
 | `GOOGLE_API_KEY` | mirrored from `GEMINI_API_KEY` | LangChain Google integration |
-| `GATEWAY_URL` | empty | Streamlit, gateway backend base URL (e.g. the CMU AI Gateway) |
-| `GATEWAY_API_KEY` | empty | Streamlit, prefills the gateway key field |
-| `ANTHROPIC_API_KEY` | empty | `indexer.py`, direct Anthropic calls when no gateway/Gemini patch is active |
+| `ANTHROPIC_API_KEY` | empty | Streamlit Anthropic backend (prefills the key field); `indexer.py` direct Anthropic calls when no Gemini patch is active |
 | `TRANSLATOR_URL` | `http://127.0.0.1:8080` | `indexer.py`, optional translation service (falls back to Gemini) |
 | `KMP_DUPLICATE_LIB_OK` | `TRUE` (set in code) | OpenMP workaround on macOS |
 | `OMP_NUM_THREADS` | `4` (set in code) | Caps embedder thread count |
@@ -749,8 +703,8 @@ The collection was built with one dimension and you are querying with another. E
 **Gemini calls fail with a 401.**
 The key is not in the environment for the running process. Setting it in the Streamlit UI patches the current process, but a freshly forked indexer worker may not see it. Easiest fix: `export GEMINI_API_KEY=...` before `streamlit run`.
 
-**Gateway mode says "Gateway API key required".**
-The sidebar key field is empty. Paste your CMU gateway key in the sidebar under "Gateway API key". The input is `password`-typed and persists for the session only.
+**Anthropic mode says "Key required".**
+The sidebar key field is empty. Export `ANTHROPIC_API_KEY` before launching or paste the key into the sidebar field. The input is `password`-typed and persists for the session only.
 
 **Model 2 never triggers.**
 By design. Model 2 only runs when Model 1 predicts OW_I or OW_II with low confidence or an OW runner-up. To force it for testing, feed inputs known to land in the OW boundary region (a 35-year-old with `bmi_bucket=2`, mixed signals on activity and diet).
@@ -759,7 +713,7 @@ By design. Model 2 only runs when Model 1 predicts OW_I or OW_II with low confid
 The composite score penalizes inputs that are far from the predicted class centroid in scaled feature space (the `x` term) or close to runner-up centroids (the `z` term). Both happen for inputs that are unusual relative to the training distribution. The score is doing its job; the prediction may still be correct, but the routing logic correctly flags it for follow-up.
 
 **Stage 1 misclassifies but Stage 2 does not run.**
-Stage 2 only fires for OW_I/OW_II boundary cases. Misclassifications outside that range (Insufficient Weight predicted as Normal, for example) are not eligible for escalation in the current router. This is consistent with the safety story: Stage 1's adjacency property guarantees those errors are at most one severity step off, and the recommended action is the same in either case.
+Stage 2 only fires for OW_I/OW_II boundary cases. Misclassifications outside that range (Insufficient Weight predicted as Normal, for example) are not eligible for escalation in the current router. The router targets the Overweight boundary only; other misclassifications are left to the confidence tier to flag.
 
 **Apple Silicon: `OMP: Error #15` on import.**
 The `KMP_DUPLICATE_LIB_OK=TRUE` workaround is set in code in both `indexer.py` and `obesity_app_v2.py`. If it still fires, ensure you did not `unset` it in your shell before launching.
@@ -774,5 +728,5 @@ The Milvus collection is empty. Either you have not run Index PDFs yet, or the i
 - **Stage 1 training set is partially synthetic.** SMOTE augmentation introduces interpolated samples that may not represent naturally-occurring lifestyle combinations. Behavior on extreme input combinations may be governed by synthetic neighbours rather than real patient data.
 - **Stage 2 fasting subsample halves N.** Including `LBXGLU` and `LBXIN` reduces the available NHANES population. An ablation comparing the full-feature model on the fasting subsample against a glucose-free model on the full phlebotomy sample is recommended before finalizing the feature set.
 - **Cross-site generalizability is unquantified.** Stage 1 is trained on a single pooled dataset with no site-level stratification. External validation on an independent cohort (NHANES 2017–2020 or UK Biobank) is required before clinical deployment.
-- **No prospective validation.** All metrics reported here are cross-validated on retrospective data. The deployment-honesty gap (the difference between CV F1 and real-world accuracy on prospectively collected user inputs) is unknown.
+- **No prospective validation.** All evaluation is cross-validated on retrospective data. Real-world behavior on prospectively collected user inputs is unknown.
 - **Diabetes risk module is rule-based, not validated independently.** It uses ADA 2024 thresholds directly, so it inherits the validity of those thresholds. It is not a diagnostic tool; the output explicitly directs users to clinical confirmation.

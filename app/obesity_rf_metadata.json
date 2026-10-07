@@ -42,7 +42,6 @@
     "Obesity_Type_II": 5,
     "Obesity_Type_III": 6
   },
-  "cv_f1_macro": 0.9471,
   "confidence_weights": {
     "a_cosine_sim": 0.0659,
     "b_model_proba": 0.99,

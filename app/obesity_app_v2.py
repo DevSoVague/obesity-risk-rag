@@ -4,16 +4,16 @@ obesity_app_v2.py
 Streamlit frontend for the obesity classifier + RAG nutrition chat.
 
 Changes from v1:
-  - Helper functions (_patch_indexer_for_gateway, _gemini_web_search) moved
+  - Helper functions (_patch_indexer_for_anthropic, _gemini_web_search) moved
     ABOVE the sidebar/tab code so they are defined before use.
   - Auto-reconnect detects collection dim from schema — no more dimension mismatch.
   - Gemini path works independently (no Anthropic key needed):
       _ensure_gemini() is patched to be a no-op when key is injected at runtime,
       and _call_claude() is monkey-patched to use Gemini when running in Gemini mode.
-  - CMU Gateway path works independently (no Gemini key needed):
-      gateway mode monkey-patches _call_claude() to route through the gateway,
-      and suppresses the _ensure_gemini() check.
-  - Empty gateway key shows a clear st.error instead of a cryptic SDK exception.
+  - Anthropic API path works independently (no Gemini key needed):
+      Anthropic mode monkey-patches _call_claude() to call the public
+      Anthropic Messages API, and suppresses the _ensure_gemini() check.
+  - Empty Anthropic key shows a clear st.error instead of a cryptic SDK exception.
 
 Folder layout (all in same directory):
     obesity_app_v2.py
@@ -256,9 +256,8 @@ _defaults = [
     ("cfg_index_type",    "HNSW"),
     ("cfg_chunk_size",    400),
     ("cfg_chunk_overlap", 50),
-    ("cfg_use_gateway",   False),
-    ("cfg_gateway_key",   os.environ.get("GATEWAY_API_KEY", "")),
-    ("cfg_gateway_url",   os.environ.get("GATEWAY_URL", "")),
+    ("cfg_use_anthropic", False),
+    ("cfg_anthropic_key", os.environ.get("ANTHROPIC_API_KEY", "")),
     ("interrupt_requested", False),
     ("is_indexing",         False),
     ("chat_interrupt_requested", False),
@@ -276,40 +275,32 @@ for k, v in _defaults:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GATEWAY LLM HELPER  (CMU Andrew AI Gateway)
-# Defined here — ABOVE sidebar and tab code — so it is always in scope.
+# ANTHROPIC LLM HELPER  (public Anthropic Messages API)
+# Defined here, ABOVE sidebar and tab code, so it is always in scope.
 # ══════════════════════════════════════════════════════════════════════════════
-def _patch_indexer_for_gateway(indexer_obj, model: str, gateway_key: str,
-                                gateway_url: str, word_count: int):
+def _patch_indexer_for_anthropic(indexer_obj, model: str, anthropic_key: str,
+                                  word_count: int):
     """
     Monkey-patch the indexer so ALL LLM calls (generate, reflect, revise)
-    route through the CMU AI Gateway instead of Gemini or a bare Anthropic key.
+    go through the public Anthropic Messages API (api.anthropic.com).
 
-    - No ANTHROPIC_API_KEY required — the gateway_key IS the auth credential.
-    - No GEMINI_API_KEY required — _ensure_gemini() is suppressed.
-    - Reflection judge: always claude-sonnet-4-20250514-v1:0
+    - anthropic_key comes from ANTHROPIC_API_KEY or the sidebar input.
+    - No GEMINI_API_KEY required: _ensure_gemini() is suppressed.
+    - Reflection judge: always claude-sonnet-4-20250514
     """
     import anthropic as _anthropic
 
     # Guard: catch empty key before the SDK throws a cryptic error
-    if not gateway_key or not gateway_key.strip():
+    if not anthropic_key or not anthropic_key.strip():
         raise ValueError(
-            "CMU AI Gateway is enabled but no API key was provided. "
-            "Enter your gateway key in the sidebar under 'Gateway API key'."
-        )
-    if not gateway_url or not gateway_url.strip():
-        raise ValueError(
-            "CMU AI Gateway is enabled but GATEWAY_URL is not set. "
-            "Export GATEWAY_URL before launching Streamlit."
+            "Anthropic API mode is enabled but no API key was provided. "
+            "Set ANTHROPIC_API_KEY or enter the key in the sidebar."
         )
 
-    JUDGE_MODEL = "claude-sonnet-4-20250514-v1:0"
+    JUDGE_MODEL = "claude-sonnet-4-20250514"
 
-    def _gateway_call(prompt: str, model_name: str = model) -> str:
-        client = _anthropic.Anthropic(
-            api_key=gateway_key,
-            base_url=gateway_url,
-        )
+    def _anthropic_call(prompt: str, model_name: str = model) -> str:
+        client = _anthropic.Anthropic(api_key=anthropic_key)
         resp = client.messages.create(
             model=model_name,
             max_tokens=max(1024, word_count * 2),
@@ -317,18 +308,18 @@ def _patch_indexer_for_gateway(indexer_obj, model: str, gateway_key: str,
         )
         return resp.content[0].text if resp.content else ""
 
-    # Patch _call_claude so generate / reflect / revise all use the gateway
-    indexer_obj._call_claude = lambda prompt: _gateway_call(prompt, JUDGE_MODEL)
+    # Patch _call_claude so generate / reflect / revise all use Anthropic
+    indexer_obj._call_claude = lambda prompt: _anthropic_call(prompt, JUDGE_MODEL)
 
-    # Suppress the Gemini key check — not needed in gateway mode
+    # Suppress the Gemini key check, not needed in Anthropic mode
     indexer_obj._ensure_gemini = lambda: None
 
-    # Store gateway metadata
-    indexer_obj._gateway_call   = _gateway_call
-    indexer_obj._gateway_model  = model
-    indexer_obj._judge_model    = JUDGE_MODEL
-    indexer_obj._word_count     = word_count
-    indexer_obj._use_gateway    = True
+    # Store backend metadata
+    indexer_obj._anthropic_call  = _anthropic_call
+    indexer_obj._anthropic_model = model
+    indexer_obj._judge_model     = JUDGE_MODEL
+    indexer_obj._word_count      = word_count
+    indexer_obj._use_anthropic   = True
 
     return indexer_obj
 
@@ -383,7 +374,7 @@ def _patch_indexer_for_gemini(indexer_obj, model: str, gemini_key: str, word_cou
     indexer_obj._call_claude    = _gemini_llm_call
     # Suppress the Gemini key check (already handled above)
     indexer_obj._ensure_gemini  = lambda: None
-    indexer_obj._use_gateway    = False
+    indexer_obj._use_anthropic  = False
 
     return indexer_obj
 
@@ -716,44 +707,41 @@ with st.sidebar:
 
         # ── API Backend ───────────────────────────────────────────────────────
         _sblabel("API Backend")
-        use_gw = st.checkbox(
-            "Use CMU AI Gateway",
-            value=st.session_state.cfg_use_gateway,
-            key="sb_use_gateway",
-            help="Routes generation through the CMU Andrew AI Gateway. "
-                 "Requires your CMU gateway API key. No Gemini key needed.",
+        use_an = st.checkbox(
+            "Use Anthropic API",
+            value=st.session_state.cfg_use_anthropic,
+            key="sb_use_anthropic",
+            help="Routes generation through the Anthropic Messages API. "
+                 "Requires ANTHROPIC_API_KEY. No Gemini key needed.",
         )
-        st.session_state.cfg_use_gateway = use_gw
+        st.session_state.cfg_use_anthropic = use_an
 
-        if use_gw:
-            gw_key = st.text_input(
-                "Gateway API key", value=st.session_state.cfg_gateway_key,
-                type="password", placeholder="sk-...",
-                key="sb_gateway_key", label_visibility="collapsed",
+        if use_an:
+            an_key = st.text_input(
+                "Anthropic API key", value=st.session_state.cfg_anthropic_key,
+                type="password",
+                key="sb_anthropic_key", label_visibility="collapsed",
             )
-            st.session_state.cfg_gateway_key = gw_key
-            if gw_key:
+            st.session_state.cfg_anthropic_key = an_key
+            if an_key:
                 st.markdown('<div style="font-size:.68rem;color:#34d399;padding-bottom:4px;">✓ Key set</div>',
                             unsafe_allow_html=True)
             else:
                 st.markdown('<div style="font-size:.68rem;color:#f87171;padding-bottom:4px;">⚠ Key required</div>',
                             unsafe_allow_html=True)
 
-            # Gateway model list
+            # Anthropic model list
             _sblabel("Generation Model")
-            GATEWAY_MODELS = [
-                "claude-sonnet-4-20250514-v1:0",
-                "claude-haiku-4-5-20251001-v1:0",
-                "claude-opus-4-20250514-v1:0",
-                "gemini-2.5-flash",
-                "gpt-5.4-pro",
-                "gpt-5",
+            ANTHROPIC_MODELS = [
+                "claude-sonnet-4-20250514",
+                "claude-haiku-4-5-20251001",
+                "claude-opus-4-20250514",
             ]
-            if st.session_state.cfg_model not in GATEWAY_MODELS:
-                st.session_state.cfg_model = GATEWAY_MODELS[0]
+            if st.session_state.cfg_model not in ANTHROPIC_MODELS:
+                st.session_state.cfg_model = ANTHROPIC_MODELS[0]
             st.session_state.cfg_model = st.selectbox(
-                "gw_model", GATEWAY_MODELS,
-                index=GATEWAY_MODELS.index(st.session_state.cfg_model),
+                "an_model", ANTHROPIC_MODELS,
+                index=ANTHROPIC_MODELS.index(st.session_state.cfg_model),
                 label_visibility="collapsed",
             )
             st.markdown(
@@ -1465,7 +1453,7 @@ with tab_chat:
             <div style="text-align:center;padding:28px 0 16px 0;">
                 <h1 style="font-size:1.8rem;font-weight:600;color:#ececec;margin:0 0 6px 0;">Nutrition Plan</h1>
                 <p style="font-size:.75rem;color:#666;letter-spacing:.06em;text-transform:uppercase;margin:0 0 14px 0;">
-                    RAG · Clinical Guidelines · {'Gateway' if st.session_state.cfg_use_gateway else 'Gemini'}</p>
+                    RAG · Clinical Guidelines · {'Anthropic' if st.session_state.cfg_use_anthropic else 'Gemini'}</p>
                 <div style="display:inline-block;background:#1a1a1a;border:1px solid #2f2f2f;
                             border-radius:8px;padding:10px 20px;">
                     <span style="font-size:.72rem;color:#555;margin-right:8px;">Result:</span>
@@ -1520,7 +1508,7 @@ with tab_chat:
                 web_extra = ""
                 if st.session_state.get("web_search_enabled", False):
                     with st.spinner("🌐 Searching the web..."):
-                        web_snippet = _gemini_web_search(active, model_name=st.session_state.cfg_model if not st.session_state.cfg_use_gateway else "gemini-2.5-flash")
+                        web_snippet = _gemini_web_search(active, model_name=st.session_state.cfg_model if not st.session_state.cfg_use_anthropic else "gemini-2.5-flash")
                     if web_snippet and not web_snippet.startswith("[Web search failed"):
                         st.markdown(
                             f'<div style="background:#0f1e33;border:1px solid #1e3a55;'
@@ -1546,7 +1534,7 @@ with tab_chat:
                 # ── Optional web search ───────────────────────────────────────
                 rag_query = full_query
                 if st.session_state.get("web_search_enabled", False):
-                    _ws_model = st.session_state.cfg_model if not st.session_state.cfg_use_gateway else "gemini-2.5-flash"
+                    _ws_model = st.session_state.cfg_model if not st.session_state.cfg_use_anthropic else "gemini-2.5-flash"
                     with st.spinner("🌐 Searching the web..."):
                         web_snippet = _gemini_web_search(active, model_name=_ws_model)
                     if web_snippet and not web_snippet.startswith("[Web search failed"):
@@ -1581,20 +1569,19 @@ with tab_chat:
                             final_rag_query = rag_query + wc_instruction
 
                             # ── Patch indexer for the active backend ──────────────
-                            if st.session_state.cfg_use_gateway:
-                                # Gateway mode — no Gemini key needed
-                                if not st.session_state.cfg_gateway_key:
+                            if st.session_state.cfg_use_anthropic:
+                                # Anthropic mode, no Gemini key needed
+                                if not st.session_state.cfg_anthropic_key:
                                     st.error(
-                                        "CMU AI Gateway is enabled but no key was provided. "
-                                        "Enter your key in the sidebar, or uncheck 'Use CMU AI Gateway'."
+                                        "Anthropic API mode is enabled but no key was provided. "
+                                        "Enter your key in the sidebar, or uncheck 'Use Anthropic API'."
                                     )
                                     st.stop()
                                 try:
-                                    _patch_indexer_for_gateway(
+                                    _patch_indexer_for_anthropic(
                                         idx,
                                         model=st.session_state.cfg_model,
-                                        gateway_key=st.session_state.cfg_gateway_key,
-                                        gateway_url=st.session_state.cfg_gateway_url,
+                                        anthropic_key=st.session_state.cfg_anthropic_key,
                                         word_count=wc,
                                     )
                                 except ValueError as ve:
@@ -1602,7 +1589,7 @@ with tab_chat:
                                     st.stop()
                                 st.markdown(
                                     f'<div style="font-size:.68rem;color:#a78bfa;padding-bottom:6px;">'
-                                    f'🔮 Gateway · {st.session_state.cfg_model} · '
+                                    f'🔮 Anthropic · {st.session_state.cfg_model} · '
                                     f'Judge: Claude Sonnet · ~{wc} words</div>',
                                     unsafe_allow_html=True,
                                 )
@@ -1743,7 +1730,7 @@ with tab_index:
                 )
 
         # Also show a Gemini key input when using BGE embed but Gemini chat mode
-        if "BGE" in embed_choice and not st.session_state.cfg_use_gateway:
+        if "BGE" in embed_choice and not st.session_state.cfg_use_anthropic:
             _env_gkey = os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
             if not _env_gkey:
                 st.markdown("<hr>", unsafe_allow_html=True)

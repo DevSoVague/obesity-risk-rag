@@ -33,7 +33,7 @@ from pymilvus import (
 # Gemini config
 # ─────────────────────────────────────────────────────────────────────────────
 # Set this in your shell 
-# export GEMINI_API_KEY="..." (see .env.example at the repo root)
+# export GEMINI_API_KEY (see the Quickstart in the root README)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_API_KEY:
     os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
