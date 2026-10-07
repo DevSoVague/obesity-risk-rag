@@ -1,7 +1,7 @@
 # Model pipeline + API (app/main.py, app/model_pipeline.py, app/resave_bundles.py)
 pandas>=1.5.0
 numpy>=1.23.0
-scikit-learn>=1.2.0
+scikit-learn>=1.8,<1.9   # shipped bundles were pickled with 1.8.0
 scipy>=1.9.0
 joblib>=1.2.0
 fastapi>=0.100.0
@@ -22,3 +22,6 @@ typing-extensions>=4.5.0
 pdfminer.six>=20221105
 pymilvus>=2.3.0
 sentence-transformers>=2.2.0   # pulls in torch
+
+# Translator microservice (services/translator/translator.py, optional)
+deep-translator>=1.11.0

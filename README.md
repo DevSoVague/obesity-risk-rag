@@ -23,12 +23,15 @@ flowchart LR
     UI -->|patient context + question| RAG[LangGraph pipeline<br/>indexer.py]
     RAG <--> MV[(Milvus<br/>HNSW / IVF_PQ / DiskANN)]
     RAG --> LLM[Gemini or Anthropic API]
+    RAG -->|query / answer| TR[Translator service<br/>services/translator :8080]
     PDF[Guideline PDFs] -->|pdfminer, 400-token chunks,<br/>BGE or Gemini embeddings| MV
 ```
 
 The FastAPI service owns both classifiers and the diabetes rules; it loads the Stage 1 bundle at startup and the Stage 2 bundles lazily by gender. The Streamlit app calls the API for assessment and runs the RAG pipeline in-process against Milvus. The assessment path needs no API keys or Milvus; only the Nutrition Plan and Index PDFs tabs do. Design rationale for every component is in [docs/METHODS.md](docs/METHODS.md).
 
 ## Quickstart
+
+The trained model bundles are committed, so the assessment path runs right after install.
 
 ```bash
 git clone https://github.com/DevSoVague/obesity-risk-rag.git
@@ -37,76 +40,92 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt          # sentence-transformers pulls in torch
 ```
 
-Download the pre-trained model bundles from the [GitHub Release](https://github.com/DevSoVague/obesity-risk-rag/releases/latest) (they are not in git):
-
-| File | Size | Put it in |
-|---|---|---|
-| `obesity_model_bundle.joblib` | 25.7 MB | `app/` |
-| `model2_pooled_bundle.joblib` | 5.0 MB | `app/model2_bundles/` |
-| `model2_male_bundle.joblib` | 2.6 MB | `app/model2_bundles/` |
-| `model2_female_bundle.joblib` | 2.8 MB | `app/model2_bundles/` |
+**One command** (translator on :8080, API on :8001, Streamlit on :8501; Ctrl+C stops all):
 
 ```bash
-BASE=https://github.com/DevSoVague/obesity-risk-rag/releases/latest/download
-curl -L -o app/obesity_model_bundle.joblib $BASE/obesity_model_bundle.joblib
-for g in pooled male female; do
-  curl -L -o app/model2_bundles/model2_${g}_bundle.joblib $BASE/model2_${g}_bundle.joblib
-done
+bash scripts/run_all.sh
 ```
 
-Run (all commands from `app/`, since bundle paths are relative):
+**Or start each piece yourself** (bundle paths are relative, so the API and UI run from `app/`):
 
 ```bash
-cd app
-uvicorn main:app --port 8001                 # API, docs at http://localhost:8001/docs
-streamlit run obesity_app_v2.py              # second terminal, UI at http://localhost:8501
+cd services/translator && uvicorn translator:app --port 8080   # optional, terminal 1
+cd app && uvicorn main:app --port 8001                          # API, docs at http://localhost:8001/docs
+cd app && streamlit run obesity_app_v2.py                       # UI at http://localhost:8501
 ```
 
-For the RAG tabs, also start Milvus (`docker compose up -d` with the [Milvus standalone compose file](https://milvus.io/docs/install_standalone-docker-compose.md)). Configuration is read from environment variables only (all optional; the assessment path needs none):
+**RAG tabs (Nutrition Plan, Index PDFs).** These need Milvus, an LLM key, and an index you build yourself:
 
-- `GEMINI_API_KEY`: Gemini generation, embeddings, and web search (`GOOGLE_API_KEY` is mirrored from it)
+```bash
+cd deploy/milvus && docker compose up -d        # Milvus on :19530, Attu UI on :8000
+export GEMINI_API_KEY=...                        # or ANTHROPIC_API_KEY for generation
+```
+
+Then download the guideline PDFs listed in [docs/sources.md](docs/sources.md) into `pdfs/`, open the **Index PDFs** tab, upload them, and click **Start Indexing**. The index is not shipped: an exported Milvus snapshot (`.npz`) stores the raw text of every chunk alongside the embeddings, which would redistribute the copyrighted PDFs. Once built, the tab can export and re-import your own snapshot.
+
+**Retrain instead of using the shipped bundles.** `bash scripts/download_data.sh`, then `cd app && python model_pipeline.py` rebuilds `app/obesity_model_bundle.joblib`. For Stage 2, run notebooks 01 and 02, copy `notebooks/merged_data/ow_*fasting_clean.csv` into `app/merged_data/`, and run `cd app && python resave_bundles.py` to rebuild `app/model2_bundles/*.joblib`.
+
+### Environment variables
+
+All optional; the assessment path needs none. Credentials are read from the environment only.
+
+- `GEMINI_API_KEY`: Gemini generation, embeddings, translation fallback, and web search (`GOOGLE_API_KEY` is mirrored from it)
 - `ANTHROPIC_API_KEY`: Anthropic API backend for RAG generation
-- `MILVUS_URI`, `MILVUS_TOKEN`, `MILVUS_COLLECTION`: Milvus connection (defaults to local `http://localhost:19530`)
+- `MILVUS_URI`, `MILVUS_TOKEN`, `MILVUS_COLLECTION`: Milvus connection (default `http://localhost:19530`)
 - `OBESITY_API_URL`: FastAPI address used by Streamlit (default `http://localhost:8001`)
-- `MODEL2_BUNDLE_DIR`: Stage 2 bundle folder (default `model2_bundles`)
-- `TRANSLATOR_URL`: optional external translator service (falls back to Gemini)
+- `MODEL2_BUNDLE_DIR`: Stage 2 bundle folder (default `model2_bundles`, relative to `app/`)
+- `TRANSLATOR_URL`: translator microservice (default `http://127.0.0.1:8080`; falls back to Gemini when unreachable)
+- `API_PORT`, `UI_PORT`, `TRANSLATOR_PORT`, `SKIP_TRANSLATOR=1`: ports and options for `scripts/run_all.sh`
+- `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`: MinIO credentials for `deploy/milvus` (falls back to MinIO's local-dev defaults)
 
 Quick API check:
 
 ```bash
+curl localhost:8001/health
 curl -X POST localhost:8001/predict -H "Content-Type: application/json" \
   -d '{"gender":1,"age":25,"family_history":1,"fcvc":2,"ncp":3,"caec":1,"ch2o":2,"faf":1,"tue":1,"calc":1,"bmi_bucket":2}'
+curl -X POST localhost:8001/predict/full -H "Content-Type: application/json" \
+  -d '{"lifestyle":{"gender":0,"age":45,"family_history":1,"fcvc":2,"ncp":3,"caec":1,"ch2o":2,"faf":1,"tue":1,"calc":1,"bmi_bucket":2},"clinical":{"waist_cm":102,"hip_cm":105,"dia_bp":85,"glucose":118,"insulin":15,"hba1c":6.1}}'
 ```
 
 ## Data
 
-No data is committed. Everything used is public:
+No data is committed (only the trained bundles). Everything used is public:
 
 - **UCI Estimation of Obesity Levels** (2,111 records, 7 classes, partly SMOTE-synthetic): [archive.ics.uci.edu/dataset/544](https://archive.ics.uci.edu/dataset/544/estimation+of+obesity+levels+based+on+eating+habits+and+physical+condition). Used by `app/model_pipeline.py` and notebook 00.
 - **NHANES August 2021 - August 2023** (CDC, files with suffix `_L`): `DEMO_L`; exam `BMX_L`, `BPXO_L`, `BAX_L`; lab `BIOPRO_L`, `GHB_L`, `GLU_L`, `INS_L`, `TCHOL_L`; questionnaire `ALQ_L`, `BAQ_L`, `BPQ_L`, `DIQ_L`, `HSQ_L`, `KIQ_U_L`, `MCQ_L`, `PAQ_L`, `SLQ_L`, `SMQ_L`, `WHQ_L`. From [wwwn.cdc.gov/nchs/nhanes](https://wwwn.cdc.gov/nchs/nhanes/continuousnhanes/default.aspx?Cycle=2021-2023).
-- **Clinical guideline PDFs** for the RAG index are copyrighted and not redistributed: [docs/sources.md](docs/sources.md) lists all 14 with citations. Download them into `pdfs/` and upload them in the Index PDFs tab.
+- **Clinical guideline PDFs** for the RAG index are copyrighted and not redistributed (neither is the built index, which embeds their text): [docs/sources.md](docs/sources.md) lists all 14 with citations.
 
-`bash scripts/download_data.sh` fetches the UCI CSV (into `app/` and `notebooks/`) and all NHANES XPT files (into `notebooks/<domain>_data/`). Notebooks 01 and 02 build `notebooks/merged_data/ow_*fasting_clean.csv`; copy those into `app/merged_data/` to rerun `app/resave_bundles.py`. `cd app && python model_pipeline.py` retrains Stage 1.
+`bash scripts/download_data.sh` fetches the UCI CSV (into `app/` and `notebooks/`) and all NHANES XPT files (into `notebooks/<domain>_data/`).
 
 ## Project structure
 
 ```
 obesity-risk-rag/
 ├── app/
-│   ├── main.py                  # FastAPI: /predict, /predict/full, /health, /features, ...
-│   ├── model_pipeline.py        # Stage 1 training, confidence score, Stage 2 router, diabetes rules
-│   ├── obesity_app_v2.py        # Streamlit UI (Assessment, Nutrition Plan, Index PDFs)
-│   ├── indexer.py               # PDF ingestion, Milvus, LangGraph RAG
-│   ├── resave_bundles.py        # retrains the three Stage 2 bundles
+│   ├── main.py                       # FastAPI: /predict, /predict/full, /health, /features, ...
+│   ├── model_pipeline.py             # Stage 1 training, confidence score, Stage 2 router, diabetes rules
+│   ├── obesity_app_v2.py             # Streamlit UI (Assessment, Nutrition Plan, Index PDFs)
+│   ├── indexer.py                    # PDF ingestion, Milvus, LangGraph RAG, translator client
+│   ├── resave_bundles.py             # retrains the three Stage 2 bundles
+│   ├── obesity_model_bundle.joblib   # Stage 1 bundle (25.7 MB)
 │   ├── obesity_rf_metadata.json
-│   └── model2_bundles/model2_metadata.json
+│   └── model2_bundles/
+│       ├── model2_{pooled,male,female}_bundle.joblib   # Stage 2 bundles (5.0 / 2.6 / 2.8 MB)
+│       └── model2_metadata.json
+├── services/translator/              # FastAPI translator microservice + Dockerfile
+├── deploy/
+│   ├── milvus/docker-compose.yml     # local Milvus standalone + Attu
+│   └── k8s/translator.yaml           # optional Kubernetes Deployment + Service for the translator
 ├── notebooks/
 │   ├── 00_model1_development.ipynb          # Stage 1 EDA, leakage study, tuning
 │   ├── 01_nhanes_merge.ipynb                # merge NHANES XPT files
 │   ├── 02_nhanes_cohort_and_features.ipynb  # cohort filters, feature engineering, gender split
 │   └── 03_model2_training.ipynb             # Stage 2 training and evaluation
-├── docs/                        # METHODS.md, NHANES_MODEL2_ANALYSIS.md, sources.md
-├── scripts/download_data.sh
+├── scripts/
+│   ├── run_all.sh                    # one-command launcher: translator + API + Streamlit
+│   └── download_data.sh              # UCI + NHANES downloads
+├── docs/                             # METHODS.md, NHANES_MODEL2_ANALYSIS.md, sources.md
 ├── requirements.txt, requirements-notebooks.txt
 └── LICENSE
 ```

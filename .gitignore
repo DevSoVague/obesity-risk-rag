@@ -23,7 +23,7 @@ service-account*.json
 *.pem
 somecommands*.txt
 
-# Data, models, build artifacts (fetch via scripts / Releases)
+# Data, models, build artifacts (fetch via scripts)
 data/
 *.joblib
 *.pt
@@ -37,7 +37,7 @@ data/
 *.tfstate*
 *.log
 
-# Project-specific (download via scripts/download_data.sh or the GitHub Release)
+# Project-specific (download via scripts/download_data.sh)
 *.csv
 *.xpt
 *.XPT
@@ -55,3 +55,10 @@ rag_index_*.npz
 final_overall.zip
 pr1/
 pr2/
+deploy/milvus/volumes/
+
+# Shipped model bundles (tracked; loaded by app/main.py and app/model_pipeline.py)
+!app/obesity_model_bundle.joblib
+!app/model2_bundles/model2_pooled_bundle.joblib
+!app/model2_bundles/model2_male_bundle.joblib
+!app/model2_bundles/model2_female_bundle.joblib

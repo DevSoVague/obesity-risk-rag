@@ -107,7 +107,7 @@ The five layers (Streamlit, FastAPI, two-stage model pipeline, Milvus, LangGraph
 | `model2_bundles/` | Three pre-trained Model 2 bundles + `model2_metadata.json` listing the 40 NHANES features. |
 | `obesity_rf_metadata.json` | Human-readable Model 1 metadata: hyperparameters, features, confidence weights. |
 
-Pre-trained bundles are published as GitHub Release assets (see the root README), so retraining is only needed if you change the data.
+Pre-trained bundles are committed in this repository at these paths, so retraining is only needed if you change the data.
 
 ---
 
@@ -425,12 +425,10 @@ See the Quickstart in the [root README](../README.md). Notes:
 
 Skip this section if you only want the Assessment tab. The indexer defaults to `http://localhost:19530`.
 
-The simplest local setup is the official standalone Docker Compose file:
+The repo ships a standalone Docker Compose file (etcd + MinIO + Milvus + the Attu web UI on port 8000):
 
 ```bash
-mkdir ~/milvus && cd ~/milvus
-curl -L https://github.com/milvus-io/milvus/releases/latest/download/milvus-standalone-docker-compose.yml \
-  -o docker-compose.yml
+cd deploy/milvus
 docker compose up -d
 ```
 
